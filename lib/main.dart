@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:pedometer/pedometer.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/pdf.dart';
@@ -276,35 +275,52 @@ class AppProvider with ChangeNotifier {
 
   // ── Carga inicial ────────────────────────────────
 
+  // carga veterinarios publicos (no requiere login)
+  Future<void> cargarVeterinarios() async {
+    try {
+      final rows = await supabase
+          .from('veterinarios')
+          .select()
+          .eq('activo', true)
+          .order('nombre');
+      veterinarios = (rows as List)
+          .map((r) => Veterinario.fromJson(r))
+          .toList();
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error cargando veterinarios: $e');
+    }
+  }
+
   Future<void> cargarTodo() async {
     if (uid == null) return;
     cargando = true; notifyListeners();
     try {
-      // cargar veterinarios (datos publicos)
-      final vetRows = await supabase.from('veterinarios')
-          .select().eq('activo', true).order('nombre');
-      veterinarios = (vetRows as List)
-          .map((r) => Veterinario.fromJson(r)).toList();
+      // veterinarios (publicos, no necesitan uid)
+      await cargarVeterinarios();
 
       final mRows = await supabase.from('mascotas')
           .select().eq('user_id', uid!);
       mascotas = (mRows as List).map((r) => Mascota.fromJson(r)).toList();
 
       final cRows = await supabase.from('citas')
-          .select().eq('user_id', uid!);
+          .select().eq('user_id', uid!).order('fecha');
       citas = (cRows as List).map((r) => Cita.fromJson(r)).toList();
 
       if (mascotas.isNotEmpty) {
         final mIds = mascotas.map((m) => m.id).toList();
         final vRows = await supabase.from('visitas_medicas')
             .select().inFilter('mascota_id', mIds);
-        visitas = (vRows as List).map((r) => VisitaMedica.fromJson(r)).toList();
+        visitas = (vRows as List)
+            .map((r) => VisitaMedica.fromJson(r)).toList();
 
         final vacRows = await supabase.from('vacunas')
             .select().inFilter('mascota_id', mIds);
         vacunas = (vacRows as List).map((r) => Vacuna.fromJson(r)).toList();
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Error en cargarTodo: $e');
+    }
     cargando = false; notifyListeners();
   }
 
@@ -488,15 +504,20 @@ class _SplashScreenState extends State<SplashScreen> {
   Future<void> _check() async {
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
+    final app = Provider.of<AppProvider>(context, listen: false);
+
+    // siempre cargar veterinarios (son datos publicos)
+    await app.cargarVeterinarios();
+
     final session = supabase.auth.currentSession;
     if (session != null) {
-      final app = Provider.of<AppProvider>(context, listen: false);
       await app._cargarPerfil(session.user.email ?? '');
       await app.cargarTodo();
       if (!mounted) return;
       Navigator.pushReplacement(context,
           MaterialPageRoute(builder: (_) => const HomeScreen()));
     } else {
+      if (!mounted) return;
       Navigator.pushReplacement(context,
           MaterialPageRoute(builder: (_) => const LoginScreen()));
     }
@@ -807,7 +828,7 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: kPrimary,
         onPressed: () => Navigator.push(context,
             MaterialPageRoute(builder: (_) => PasosScreen(app: app))),
-        child: const FaIcon(FontAwesomeIcons.dog, color: Colors.white),
+        child: const Icon(Icons.directions_walk, color: Colors.white, size: 26),
       ),
       bottomNavigationBar: BottomAppBar(
         shape: const CircularNotchedRectangle(),
@@ -1366,13 +1387,24 @@ class _HomeScreenState extends State<HomeScreen> {
             ? Container(
                 padding: const EdgeInsets.all(14),
                 decoration: _cardDeco(),
-                child: const Row(children: [
-                  SizedBox(width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
-                  SizedBox(width: 10),
-                  Text('Cargando veterinarios...',
-                      style: TextStyle(color: Colors.grey, fontSize: 13)),
-                ]),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(children: [
+                      SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: kPrimary)),
+                      SizedBox(width: 10),
+                      Text('Cargando veterinarios...',
+                          style: TextStyle(color: Colors.grey, fontSize: 13)),
+                    ]),
+                    TextButton(
+                      onPressed: () => app.cargarVeterinarios(),
+                      child: const Text('Reintentar',
+                          style: TextStyle(color: kPrimary, fontSize: 12)),
+                    ),
+                  ],
+                ),
               )
             : _drop<String>(
                 value: _veterinario,
@@ -1380,22 +1412,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: Icons.person_outline,
                 items: app.veterinarios.map((v) => DropdownMenuItem(
                   value: v.nombre,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(v.nombre,
-                          style: const TextStyle(fontWeight: FontWeight.w600)),
-                      if (v.especialidad != null)
-                        Text(v.especialidad!,
-                            style: const TextStyle(
-                                fontSize: 11, color: Colors.grey)),
-                    ],
+                  child: Text(
+                    v.especialidad != null
+                        ? '${v.nombre} · ${v.especialidad}'
+                        : v.nombre,
+                    style: const TextStyle(fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 )).toList(),
                 onChanged: (v) => setState(() {
                   _veterinario = v;
-                  _horaCita = ''; // reset hora al cambiar vet
+                  _horaCita = '';
                 }),
               ),
         const SizedBox(height: 20),
@@ -3907,7 +3934,7 @@ void main() async {
 
   await Supabase.initialize(
     url:     'https://knidpuslwnbrcymbirwh.supabase.co',  
-    anonKey: 'sb_publishable_NWbhMTEqrDCOCCS1xJEnQA_bCUr4bb2',                      
+    anonKey: 'sb_publishable_NWbhMTEqrDCOCCS1xJEnQA_bCUr4bb2'                       // ← reemplaza con tu anon key
   );
 
   runApp(ChangeNotifierProvider(
